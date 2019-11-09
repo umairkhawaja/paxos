@@ -2,6 +2,9 @@ package paxos
 
 import (
 	"errors"
+	"net"
+	"net/http"
+	"net/rpc"
 	"paxosapp/rpc/paxosrpc"
 	"time"
 )
@@ -10,6 +13,8 @@ var PROPOSE_TIMEOUT = 15 * time.Second
 
 type paxosNode struct {
 	// TODO: implement this!
+	nodes map[int]*rpc.Client
+	myID  int
 }
 
 // Desc:
@@ -27,7 +32,37 @@ type paxosNode struct {
 // numRetries: if we can't connect with some nodes in hostMap after numRetries attempts, an error should be returned
 // replace: a flag which indicates whether this node is a replacement for a node which failed.
 func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, numRetries int, replace bool) (PaxosNode, error) {
-	return nil, errors.New("not implemented")
+	node := new(paxosNode)
+	node.myID = srvId
+
+	prpc := paxosrpc.Wrap(node)
+	srv := rpc.NewServer()
+	srv.Register(prpc)
+	srv.HandleHTTP(rpc.DefaultRPCPath, rpc.DefaultDebugPath)
+	ln, err := net.Listen("tcp", myHostPort)
+	if err != nil {
+		return nil, err
+	}
+	http.Serve(ln, nil)
+
+	for k, v := range hostMap {
+		var e error
+		for i := numRetries; i >= 0; i-- {
+			client, dialErr := rpc.DialHTTP("tcp", v)
+			if dialErr == nil {
+				node.nodes[k] = client
+				e = nil
+				break
+			} else {
+				e = dialErr
+				time.Sleep(1)
+			}
+		}
+		if e != nil {
+			return nil, e
+		}
+	}
+	return node, nil
 }
 
 // Desc:
