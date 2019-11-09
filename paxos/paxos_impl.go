@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"paxosapp/rpc/paxosrpc"
+	"strconv"
 	"time"
 )
 
@@ -13,8 +14,10 @@ var PROPOSE_TIMEOUT = 15 * time.Second
 
 type paxosNode struct {
 	// TODO: implement this!
-	nodes map[int]*rpc.Client
-	myID  int
+	nodes              map[int]*rpc.Client
+	myID               int
+	minProposalNumbers map[string]int
+	maxRoundNumber     int
 }
 
 // Desc:
@@ -33,6 +36,8 @@ type paxosNode struct {
 // replace: a flag which indicates whether this node is a replacement for a node which failed.
 func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, numRetries int, replace bool) (PaxosNode, error) {
 	node := new(paxosNode)
+	node.nodes = make(map[int]*rpc.Client)
+	node.minProposalNumbers = make(map[string]int)
 	node.myID = srvId
 
 	prpc := paxosrpc.Wrap(node)
@@ -74,7 +79,10 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 // args: the key to propose
 // reply: the next proposal number for the given key
 func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, reply *paxosrpc.ProposalNumberReply) error {
-	return errors.New("not implemented")
+	pn.maxRoundNumber++
+	reply.N = mergeNumbers(pn.maxRoundNumber, pn.myID)
+	return nil
+
 }
 
 // Desc:
@@ -86,6 +94,7 @@ func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, re
 // args: the key, value pair to propose together with the proposal number returned by GetNextProposalNumber
 // reply: value that was actually committed for the given key
 func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.ProposeReply) error {
+	proposalNumber := pn.GetNextProposalNumber
 	return errors.New("not implemented")
 }
 
@@ -161,4 +170,12 @@ func (pn *paxosNode) RecvReplaceServer(args *paxosrpc.ReplaceServerArgs, reply *
 // reply: a byte array containing necessary data used by replacement server to recover
 func (pn *paxosNode) RecvReplaceCatchup(args *paxosrpc.ReplaceCatchupArgs, reply *paxosrpc.ReplaceCatchupReply) error {
 	return errors.New("not implemented")
+}
+
+func mergeNumbers(rn, id int) int {
+	merged, err := strconv.Atoi(strconv.Itoa(rn) + strconv.Itoa(id))
+	if err != nil {
+		panic(err)
+	}
+	return merged
 }
