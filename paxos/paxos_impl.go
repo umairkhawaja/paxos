@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/rpc"
 	"paxosapp/rpc/paxosrpc"
-	"strconv"
 	"time"
 )
 
@@ -94,7 +93,17 @@ func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, re
 // args: the key, value pair to propose together with the proposal number returned by GetNextProposalNumber
 // reply: value that was actually committed for the given key
 func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.ProposeReply) error {
-	proposalNumber := pn.GetNextProposalNumber
+	replies := make(map[int]*paxosrpc.PrepareReply)
+
+	prepareArgs := new(paxosrpc.PrepareArgs)
+	prepareArgs.Key = args.Key
+	prepareArgs.N = args.N
+	prepareArgs.RequesterId = pn.myID
+
+	for id, client := range pn.nodes {
+		replies[id] = new(paxosrpc.PrepareReply)
+		client.Call("RecvPrepare", prepareArgs, replies[id])
+	}
 	return errors.New("not implemented")
 }
 
@@ -173,9 +182,16 @@ func (pn *paxosNode) RecvReplaceCatchup(args *paxosrpc.ReplaceCatchupArgs, reply
 }
 
 func mergeNumbers(rn, id int) int {
-	merged, err := strconv.Atoi(strconv.Itoa(rn) + strconv.Itoa(id))
-	if err != nil {
-		panic(err)
-	}
-	return merged
+	return ((rn << 32) | id)
+	// merged, err := strconv.Atoi(strconv.Itoa(rn) + strconv.Itoa(id))
+	// if err != nil {
+	// panic(err)
+	// }
+	// return merged
+}
+
+func splitNumber(num int) (int, int) {
+	roundNumber := num >> 32
+	serverID := num & 0xffff
+	return roundNumber, serverID
 }
