@@ -98,6 +98,7 @@ func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, re
 func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.ProposeReply) error {
 
 	result := make(chan *paxosrpc.ProposeReply)
+	startOver := make(chan bool)
 	// The actual work is done in this go routine
 	go func() {
 		promises := make([]*paxosrpc.PrepareReply, len(pn.nodes))
@@ -181,10 +182,19 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 		}
 		if anyRejections {
 			// Start over with new proposal number
+			startOver <- true
 			// pn.nodes[pn.myID].Call("Propose")
 		} else {
-			// Commit and update (key,value) pair
-			pn.database[acceptMessage.Key] = acceptMessage.V
+			// 6b) Commit and update (key,value) pair
+			// pn.database[acceptMessage.Key] = acceptMessage.V
+			for _, client := range pn.nodes {
+				commitData := new(paxosrpc.CommitArgs)
+				commitData.Key = acceptMessage.Key
+				commitData.V = acceptMessage.V
+				commitData.RequesterId = acceptMessage.RequesterId // CHECK THIS LATER
+				commitResp := new(paxosrpc.CommitReply)
+				client.Call("RecvCommit", commitData, commitResp)
+			}
 			commitedData := new(paxosrpc.ProposeReply)
 			commitedData.V = acceptMessage.V
 			result <- commitedData
@@ -198,7 +208,16 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 	case res := <-result:
 		reply = res
 		return nil
+	case <-startOver:
+		break
 	}
+	// 6a)  If paxos rejected value, then start over
+	pnArgs := new(paxosrpc.ProposalNumberArgs)
+	pnArgs.Key = args.Key
+	proposalNumber := new(paxosrpc.ProposalNumberReply)
+	pn.GetNextProposalNumber(pnArgs, proposalNumber)
+	args.N = proposalNumber.N
+	pn.nodes[pn.myID].Call("Propose", args, reply)
 }
 
 // Desc:
