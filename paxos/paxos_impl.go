@@ -16,7 +16,8 @@ type paxosNode struct {
 	nodes              map[int]*rpc.Client
 	myID               int
 	minProposalNumbers map[string]int
-	maxRoundNumber     int
+	maxRoundNumber     map[string]int
+	database           map[string]interface{}
 }
 
 // Desc:
@@ -37,6 +38,8 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 	node := new(paxosNode)
 	node.nodes = make(map[int]*rpc.Client)
 	node.minProposalNumbers = make(map[string]int)
+	node.maxRoundNumber = make(map[string]int)
+	node.database = make(map[string]interface{})
 	node.myID = srvId
 
 	prpc := paxosrpc.Wrap(node)
@@ -78,8 +81,8 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 // args: the key to propose
 // reply: the next proposal number for the given key
 func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, reply *paxosrpc.ProposalNumberReply) error {
-	pn.maxRoundNumber++
-	reply.N = mergeNumbers(pn.maxRoundNumber, pn.myID)
+	pn.maxRoundNumber[args.Key]++
+	reply.N = mergeNumbers(pn.maxRoundNumber[args.Key], pn.myID)
 	return nil
 
 }
@@ -93,18 +96,109 @@ func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, re
 // args: the key, value pair to propose together with the proposal number returned by GetNextProposalNumber
 // reply: value that was actually committed for the given key
 func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.ProposeReply) error {
-	replies := make(map[int]*paxosrpc.PrepareReply)
 
-	prepareArgs := new(paxosrpc.PrepareArgs)
-	prepareArgs.Key = args.Key
-	prepareArgs.N = args.N
-	prepareArgs.RequesterId = pn.myID
+	result := make(chan *paxosrpc.ProposeReply)
+	// The actual work is done in this go routine
+	go func() {
+		promises := make([]*paxosrpc.PrepareReply, len(pn.nodes))
 
-	for id, client := range pn.nodes {
-		replies[id] = new(paxosrpc.PrepareReply)
-		client.Call("RecvPrepare", prepareArgs, replies[id])
+		majorityOn := int(len(pn.nodes) / 2)
+		prepareArgs := new(paxosrpc.PrepareArgs)
+		prepareArgs.Key = args.Key
+		prepareArgs.N = args.N
+		prepareArgs.RequesterId = pn.myID
+		// 2) Broadcast Prepare to all paxos nodes
+		prepareResponses := make(chan *paxosrpc.PrepareReply, len(pn.nodes))
+		for _, client := range pn.nodes {
+			go func(c *rpc.Client) {
+				reply := new(paxosrpc.PrepareReply)
+				c.Call("RecvPrepare", prepareArgs, reply)
+				prepareResponses <- reply
+				return
+			}(client)
+		}
+		// 4) Wait for MAJORITY responses
+		func() {
+			for {
+				select {
+				case reply := <-prepareResponses:
+					promises = append(promises, reply)
+					if len(promises) >= majorityOn { // Do not wait for all replies.
+						return
+					}
+				default:
+				}
+			}
+		}()
+		// 4) Process the replies and generate Accept Message
+		noAcceptedValues := true
+		acceptMessage := new(paxosrpc.AcceptArgs)
+		_ = noAcceptedValues
+		_ = acceptMessage
+		for _, promise := range promises {
+			if promise.N_a != -1 && promise.V_a != nil {
+				noAcceptedValues = false
+				if acceptMessage.N == 0 && acceptMessage.V == nil {
+					acceptMessage.N = promise.N_a
+					acceptMessage.V = promise.V_a
+				} else if promise.N_a > acceptMessage.N {
+					acceptMessage.N = promise.N_a
+					acceptMessage.V = promise.V_a
+				}
+			}
+		}
+		// 5) Broadcast Accept message
+		acceptResponses := make(chan *paxosrpc.AcceptReply, len(pn.nodes))
+		responses := make([]*paxosrpc.AcceptReply, len(pn.nodes))
+		for _, client := range pn.nodes {
+			go func(c *rpc.Client) {
+				reply := new(paxosrpc.AcceptReply)
+				c.Call("RecvAccept", acceptMessage, reply)
+				acceptResponses <- reply
+				return
+			}(client)
+		}
+		// 5) Wait for MAJORITY responses
+		func() {
+			for {
+				select {
+				case reply := <-acceptResponses:
+					responses = append(responses, reply)
+					if len(responses) >= majorityOn { // Do not wait for all replies.
+						return
+					}
+				default:
+				}
+			}
+		}()
+		// 6) Check if paxos accepted or rejected it
+		anyRejections := false
+		for _, response := range responses {
+			if response.Status == paxosrpc.Reject {
+				anyRejections = true
+				break
+			}
+		}
+		if anyRejections {
+			// Start over with new proposal number
+			// pn.nodes[pn.myID].Call("Propose")
+		} else {
+			// Commit and update (key,value) pair
+			pn.database[acceptMessage.Key] = acceptMessage.V
+			commitedData := new(paxosrpc.ProposeReply)
+			commitedData.V = acceptMessage.V
+			result <- commitedData
+		}
+
+	}()
+	// Construct to make use of timeouts
+	select {
+	case <-time.After(PROPOSE_TIMEOUT):
+		return errors.New("PROPOSE TIMED OUT")
+	case res := <-result:
+		reply = res
+		return nil
 	}
-	return errors.New("not implemented")
 }
 
 // Desc:
@@ -182,7 +276,7 @@ func (pn *paxosNode) RecvReplaceCatchup(args *paxosrpc.ReplaceCatchupArgs, reply
 }
 
 func mergeNumbers(rn, id int) int {
-	return ((rn << 32) | id)
+	return ((rn << 32) | (id & 0xffff))
 	// merged, err := strconv.Atoi(strconv.Itoa(rn) + strconv.Itoa(id))
 	// if err != nil {
 	// panic(err)
