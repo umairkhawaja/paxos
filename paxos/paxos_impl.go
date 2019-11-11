@@ -18,8 +18,13 @@ type paxosNode struct {
 	myID               int
 	minProposalNumbers map[string]int
 	maxRoundNumber     map[string]int
+	acceptedProposals  map[string]int
+	acceptedValues     map[string]interface{}
 	database           map[string]interface{}
 	dbMutex            *sync.Mutex
+	minProposalMutex   *sync.Mutex
+	valuesMutex        *sync.Mutex
+	proposalsMutex     *sync.Mutex
 }
 
 // Desc:
@@ -40,10 +45,14 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 	node := new(paxosNode)
 	node.nodes = make(map[int]*rpc.Client)
 	node.minProposalNumbers = make(map[string]int)
+	node.acceptedProposals = make(map[string]int)
 	node.maxRoundNumber = make(map[string]int)
 	node.database = make(map[string]interface{})
 	node.myID = srvId
 	node.dbMutex = new(sync.Mutex)
+	node.minProposalMutex = new(sync.Mutex)
+	node.valuesMutex = new(sync.Mutex)
+	node.proposalsMutex = new(sync.Mutex)
 
 	prpc := paxosrpc.Wrap(node)
 	srv := rpc.NewServer()
@@ -254,7 +263,30 @@ func (pn *paxosNode) GetValue(args *paxosrpc.GetValueArgs, reply *paxosrpc.GetVa
 // args: the Prepare Message, you must include RequesterId when you call this API
 // reply: the Prepare Reply Message
 func (pn *paxosNode) RecvPrepare(args *paxosrpc.PrepareArgs, reply *paxosrpc.PrepareReply) error {
-	return errors.New("not implemented")
+	proposedNumber := args.N
+	key := args.Key
+	minProposal := pn.minProposalNumbers[key]
+	if proposedNumber > minProposal {
+		pn.minProposalMutex.Lock()
+		pn.minProposalNumbers[key] = proposedNumber
+		pn.minProposalMutex.Unlock()
+
+		pn.proposalsMutex.Lock()
+		reply.N_a = pn.acceptedProposals[key]
+		pn.proposalsMutex.Unlock()
+
+		pn.valuesMutex.Lock()
+		reply.V_a = pn.acceptedValues[key]
+		pn.valuesMutex.Unlock()
+
+		reply.Status = paxosrpc.OK
+		return nil
+	} else {
+		reply.N_a = -1
+		reply.V_a = nil
+		reply.Status = paxosrpc.Reject
+		return nil
+	}
 }
 
 // Desc:
@@ -267,7 +299,25 @@ func (pn *paxosNode) RecvPrepare(args *paxosrpc.PrepareArgs, reply *paxosrpc.Pre
 // args: the Please Accept Message, you must include RequesterId when you call this API
 // reply: the Accept Reply Message
 func (pn *paxosNode) RecvAccept(args *paxosrpc.AcceptArgs, reply *paxosrpc.AcceptReply) error {
-	return errors.New("not implemented")
+	proposalNumber := args.N
+	key := args.Key
+	value := args.V
+
+	pn.minProposalMutex.Lock()
+	if proposalNumber >= pn.minProposalNumbers[key] {
+		pn.proposalsMutex.Lock()
+		pn.valuesMutex.Lock()
+		pn.acceptedProposals[key] = proposalNumber
+		pn.minProposalNumbers[key] = proposalNumber
+		pn.acceptedValues[key] = value
+		reply.Status = paxosrpc.OK
+		pn.proposalsMutex.Unlock()
+		pn.valuesMutex.Unlock()
+	} else {
+		reply.Status = paxosrpc.Reject
+	}
+	pn.minProposalMutex.Unlock()
+
 }
 
 // Desc:
@@ -279,7 +329,12 @@ func (pn *paxosNode) RecvAccept(args *paxosrpc.AcceptArgs, reply *paxosrpc.Accep
 // args: the Commit Message, you must include RequesterId when you call this API
 // reply: the Commit Reply Message
 func (pn *paxosNode) RecvCommit(args *paxosrpc.CommitArgs, reply *paxosrpc.CommitReply) error {
-	return errors.New("not implemented")
+	key := args.Key
+	value := args.V
+	pn.dbMutex.Lock()
+	pn.database[key] = value
+	pn.dbMutex.Unlock()
+	return nil
 }
 
 // Desc:
