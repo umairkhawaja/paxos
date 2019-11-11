@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"paxosapp/rpc/paxosrpc"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,7 @@ type paxosNode struct {
 	minProposalNumbers map[string]int
 	maxRoundNumber     map[string]int
 	database           map[string]interface{}
+	dbMutex            *sync.Mutex
 }
 
 // Desc:
@@ -41,6 +43,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 	node.maxRoundNumber = make(map[string]int)
 	node.database = make(map[string]interface{})
 	node.myID = srvId
+	node.dbMutex = new(sync.Mutex)
 
 	prpc := paxosrpc.Wrap(node)
 	srv := rpc.NewServer()
@@ -228,7 +231,17 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 // args: the key to check
 // reply: the value and status for this lookup of the given key
 func (pn *paxosNode) GetValue(args *paxosrpc.GetValueArgs, reply *paxosrpc.GetValueReply) error {
-	return errors.New("not implemented")
+	key := args.Key
+	pn.dbMutex.Lock()
+	val, ok := pn.database[key]
+	pn.dbMutex.Unlock()
+	if ok {
+		reply.V = val
+		reply.Status = paxosrpc.KeyFound
+	} else {
+		reply.Status = paxosrpc.KeyNotFound
+	}
+	return nil
 }
 
 // Desc:
