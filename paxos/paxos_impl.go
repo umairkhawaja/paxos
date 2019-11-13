@@ -53,7 +53,6 @@ type paxosNode struct {
 // numRetries: if we can't connect with some nodes in hostMap after numRetries attempts, an error should be returned
 // replace: a flag which indicates whether this node is a replacement for a node which failed.
 func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, numRetries int, replace bool) (PaxosNode, error) {
-	// node := &paxosNode{}
 	LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
 	name = myHostPort + " log.txt"
 	file, _ = os.OpenFile(name, flag, perm)
@@ -100,7 +99,6 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 			return nil, dialErr
 		}
 	}
-	// LOGF.Println("NumNodes:", len(node.nodes))
 	return node, nil
 }
 
@@ -128,29 +126,26 @@ func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, re
 // reply: value that was actually committed for the given key
 func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.ProposeReply) error {
 	LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
-	LOGF.Println("My address: ", pn.myAddr)
-	result := make(chan *paxosrpc.ProposeReply)
+	LOGF.Println(pn.myAddr, " is Proposing: ", args.N, " For key: ", args.Key, " with value: ", args.V)
+	result := make(chan paxosrpc.ProposeReply)
 	startOver := make(chan bool)
-	prepareResponses := make(chan *paxosrpc.PrepareReply, len(pn.nodes))
-	acceptResponses := make(chan *paxosrpc.AcceptReply, len(pn.nodes))
+	prepareResponses := make(chan paxosrpc.PrepareReply, len(pn.nodes))
+	acceptResponses := make(chan paxosrpc.AcceptReply, len(pn.nodes))
 	// The actual work is done in this go routine
 	go func() {
-		promises := make([]*paxosrpc.PrepareReply, len(pn.nodes))
+		promises := make([]paxosrpc.PrepareReply, len(pn.nodes))
 
 		majorityOn := int(len(pn.nodes) / 2)
-		prepareArgs := new(paxosrpc.PrepareArgs)
+		prepareArgs := paxosrpc.PrepareArgs{}
 		prepareArgs.Key = args.Key
 		prepareArgs.N = args.N
 		prepareArgs.RequesterId = pn.myID
 		// 2) Broadcast Prepare to all paxos nodes
-		// fmt.Println("Sending Prepare to : ", len(pn.nodes))
 		for k, client := range pn.nodes {
 			go func(c *rpc.Client, k string) {
-				reply := new(paxosrpc.PrepareReply)
-				// reply := paxosrpc.PrepareReply{}
-				err := c.Call("PaxosNode.RecvPrepare", prepareArgs, &reply)
-				LOGF.Println(err)
-				LOGF.Println("RECEIVED PREPARE FROM", k)
+				reply := paxosrpc.PrepareReply{}
+				c.Call("PaxosNode.RecvPrepare", &prepareArgs, &reply)
+				// LOGF.Println("RECEIVED PREPARE FROM", k)
 				prepareResponses <- reply
 				return
 			}(client, k)
@@ -160,8 +155,9 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 			for {
 				select {
 				case reply := <-prepareResponses:
+					LOGF.Println("Got a Promise: ", reply.N_a, reply.V_a, reply.Status)
 					promises = append(promises, reply)
-					if len(promises) >= majorityOn { // Do not wait for all replies.
+					if len(promises) > majorityOn { // Do not wait for all replies.
 						return
 					}
 				default:
@@ -170,39 +166,39 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 		}()
 		// 4) Process the replies and generate Accept Message
 		noAcceptedValues := true
-		// acceptMessage := new(paxosrpc.AcceptArgs)
-		acceptMessage := paxosrpc.AcceptArgs{}
-		_ = noAcceptedValues
-		_ = acceptMessage
+		maxAcceptedProposal := args.N
+		var maxAcceptedValue interface{}
+		maxAcceptedValue = args.V
 		for _, promise := range promises {
 			if promise.N_a != -1 && promise.V_a != nil {
 				noAcceptedValues = false
-				if acceptMessage.N == 0 && acceptMessage.V == nil {
-					acceptMessage.N = promise.N_a
-					acceptMessage.V = promise.V_a
-				} else if promise.N_a > acceptMessage.N {
-					acceptMessage.N = promise.N_a
-					acceptMessage.V = promise.V_a
+				if promise.N_a > maxAcceptedProposal {
+					maxAcceptedProposal = promise.N_a
+					maxAcceptedValue = promise.V_a
 				}
 			}
 		}
+		acceptMessage := paxosrpc.AcceptArgs{}
 		if noAcceptedValues {
 			acceptMessage.N = args.N
 			acceptMessage.V = args.V
 			acceptMessage.Key = args.Key
-			acceptMessage.RequesterId = pn.myID
+		} else {
+			acceptMessage.N = maxAcceptedProposal
+			acceptMessage.V = maxAcceptedValue
+			acceptMessage.Key = args.Key
+			args.N = maxAcceptedProposal
+			args.V = maxAcceptedValue
 		}
-		// LOGF.Println("Accepted Message:", acceptMessage.N, acceptMessage.V)
+		acceptMessage.RequesterId = pn.myID
 		// 5) Broadcast Accept message
-		responses := make([]*paxosrpc.AcceptReply, len(pn.nodes))
+		responses := make([]paxosrpc.AcceptReply, len(pn.nodes))
 		for _, client := range pn.nodes {
 			go func(c *rpc.Client) {
-				reply := new(paxosrpc.AcceptReply)
-				// msg := acceptMessage
-				// reply := paxosrpc.AcceptReply{}
-				err := c.Call("PaxosNode.RecvAccept", &acceptMessage, &reply)
-				LOGF.Println(err)
-				LOGF.Println("RECEIVED ACCEPT")
+				reply := paxosrpc.AcceptReply{}
+				msg := acceptMessage
+				c.Call("PaxosNode.RecvAccept", &msg, &reply)
+				// LOGF.Println("RECEIVED ACCEPT")
 				acceptResponses <- reply
 				return
 			}(client)
@@ -212,8 +208,9 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 			for {
 				select {
 				case reply := <-acceptResponses:
+					// LOGF.Println("Got response to Accept: ", reply.N_a, reply.V_a, reply.Status)
 					responses = append(responses, reply)
-					if len(responses) >= majorityOn { // Do not wait for all replies.
+					if len(responses) > majorityOn { // Do not wait for all replies.
 						return
 					}
 				default:
@@ -231,21 +228,23 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 		if anyRejections {
 			// Start over with new proposal number
 			startOver <- true
-			// pn.nodes[pn.myID].Call("Propose")
 		} else {
 			// 6b) Commit and update (key,value) pair
-			// pn.database[acceptMessage.Key] = acceptMessage.V
-			for _, client := range pn.nodes {
-				commitData := new(paxosrpc.CommitArgs)
-				commitData.Key = acceptMessage.Key
-				commitData.V = acceptMessage.V
-				commitData.RequesterId = acceptMessage.RequesterId // CHECK THIS LATER
-				commitResp := new(paxosrpc.CommitReply)
-				client.Call("PaxosNode.RecvCommit", commitData, &commitResp)
-				LOGF.Println("RECEIVED COMMIT")
+			committedMessage := acceptMessage
+			for k, client := range pn.nodes {
+				commArgs := paxosrpc.CommitArgs{}
+				commArgs.Key = committedMessage.Key
+				commArgs.V = committedMessage.V
+				LOGF.Println("Sending Commit for: ", commArgs.Key, commArgs.V, " to : ", k)
+				if commArgs.Key != "" {
+					commArgs.RequesterId = committedMessage.RequesterId
+					commitResp := paxosrpc.CommitReply{}
+					client.Call("PaxosNode.RecvCommit", &commArgs, &commitResp)
+				}
+				// LOGF.Println("RECEIVED COMMIT")
 			}
-			commitedData := new(paxosrpc.ProposeReply)
-			commitedData.V = acceptMessage.V
+			commitedData := paxosrpc.ProposeReply{}
+			commitedData.V = committedMessage.V
 			result <- commitedData
 		}
 
@@ -255,16 +254,10 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 	case <-time.After(PROPOSE_TIMEOUT):
 		return errors.New("PROPOSE TIMED OUT")
 	case res := <-result:
-		reply = res
+		reply.V = res.V
 		return nil
 	case <-startOver:
 		// 6a)  If paxos rejected value, then start over
-		// pnArgs := new(paxosrpc.ProposalNumberArgs)
-		// pnArgs.Key = args.Key
-		// proposalNumber := new(paxosrpc.ProposalNumberReply)
-		// pn.GetNextProposalNumber(pnArgs, proposalNumber)
-		// args.N = proposalNumber.N
-		// pn.nodes[pn.myID].Call("Propose", args, reply)
 		reply.V = nil
 		return nil
 	}
@@ -301,47 +294,38 @@ func (pn *paxosNode) GetValue(args *paxosrpc.GetValueArgs, reply *paxosrpc.GetVa
 // args: the Prepare Message, you must include RequesterId when you call this API
 // reply: the Prepare Reply Message
 func (pn *paxosNode) RecvPrepare(args *paxosrpc.PrepareArgs, reply *paxosrpc.PrepareReply) error {
-	LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
+	// LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
 	proposedNumber := args.N
 	key := args.Key
+	pn.minProposalMutex.Lock()
+	pn.proposalsMutex.Lock()
+	pn.valuesMutex.Lock()
 	minProposal, ok := pn.minProposalNumbers[key]
 	if !ok {
-		pn.minProposalMutex.Lock()
 		pn.minProposalNumbers[key] = proposedNumber
-		pn.minProposalMutex.Unlock()
-		pn.proposalsMutex.Lock()
 		reply.N_a = -1
-		pn.proposalsMutex.Unlock()
-
-		pn.valuesMutex.Lock()
 		reply.V_a = nil
-		pn.valuesMutex.Unlock()
-
 		reply.Status = paxosrpc.OK
-		// LOGF.Println("SATUS: ", reply.Status)
-		// return nil
 	} else if proposedNumber > minProposal {
-		pn.minProposalMutex.Lock()
 		pn.minProposalNumbers[key] = proposedNumber
-		pn.minProposalMutex.Unlock()
-		pn.proposalsMutex.Lock()
-		reply.N_a = pn.acceptedProposals[key]
-		pn.proposalsMutex.Unlock()
-
-		pn.valuesMutex.Lock()
-		reply.V_a = pn.acceptedValues[key]
-		pn.valuesMutex.Unlock()
-
-		reply.Status = paxosrpc.OK
-		// LOGF.Println("SATUS: ", reply.Status)
-		// return nil
+		acceptedProposal, aok := pn.acceptedProposals[key]
+		if aok {
+			reply.N_a = acceptedProposal
+			reply.V_a = pn.acceptedValues[key]
+			reply.Status = paxosrpc.OK
+		} else {
+			reply.N_a = -1
+			reply.V_a = nil
+			reply.Status = paxosrpc.OK
+		}
 	} else {
-		reply.N_a = -1
-		reply.V_a = nil
+		reply.N_a = pn.acceptedProposals[key]
+		reply.V_a = pn.acceptedValues[key]
 		reply.Status = paxosrpc.Reject
-		// return nil
 	}
-	LOGF.Println(pn.myAddr, ": Here")
+	pn.minProposalMutex.Unlock()
+	pn.proposalsMutex.Unlock()
+	pn.valuesMutex.Unlock()
 	return nil
 }
 
@@ -355,36 +339,30 @@ func (pn *paxosNode) RecvPrepare(args *paxosrpc.PrepareArgs, reply *paxosrpc.Pre
 // args: the Please Accept Message, you must include RequesterId when you call this API
 // reply: the Accept Reply Message
 func (pn *paxosNode) RecvAccept(args *paxosrpc.AcceptArgs, reply *paxosrpc.AcceptReply) error {
-	LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
+	// LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
 	proposalNumber := args.N
 	key := args.Key
 	value := args.V
 	pn.minProposalMutex.Lock()
+	pn.proposalsMutex.Lock()
+	pn.valuesMutex.Lock()
 	minProposal, ok := pn.minProposalNumbers[key]
 	if !ok {
-		pn.proposalsMutex.Lock()
-		pn.valuesMutex.Lock()
 		pn.acceptedProposals[key] = proposalNumber
 		pn.minProposalNumbers[key] = proposalNumber
 		pn.acceptedValues[key] = value
 		reply.Status = paxosrpc.OK
-		pn.proposalsMutex.Unlock()
-		pn.valuesMutex.Unlock()
 	} else if proposalNumber >= minProposal {
-		pn.proposalsMutex.Lock()
-		pn.valuesMutex.Lock()
 		pn.acceptedProposals[key] = proposalNumber
 		pn.minProposalNumbers[key] = proposalNumber
 		pn.acceptedValues[key] = value
-		LOGF.Println("Accepted: ", proposalNumber, value)
 		reply.Status = paxosrpc.OK
-		pn.proposalsMutex.Unlock()
-		pn.valuesMutex.Unlock()
 	} else {
 		reply.Status = paxosrpc.Reject
 	}
+	pn.proposalsMutex.Unlock()
+	pn.valuesMutex.Unlock()
 	pn.minProposalMutex.Unlock()
-	// LOGF.Println("Accepted?:", reply.Status)
 	return nil
 }
 
@@ -397,8 +375,11 @@ func (pn *paxosNode) RecvAccept(args *paxosrpc.AcceptArgs, reply *paxosrpc.Accep
 // args: the Commit Message, you must include RequesterId when you call this API
 // reply: the Commit Reply Message
 func (pn *paxosNode) RecvCommit(args *paxosrpc.CommitArgs, reply *paxosrpc.CommitReply) error {
+	LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
+
 	key := args.Key
 	value := args.V
+	LOGF.Println("Committing: ", key, value)
 	pn.dbMutex.Lock()
 	pn.database[key] = value
 	pn.dbMutex.Unlock()
