@@ -36,6 +36,7 @@ type paxosNode struct {
 	minProposalMutex   *sync.Mutex
 	valuesMutex        *sync.Mutex
 	proposalsMutex     *sync.Mutex
+	clientsMutex       *sync.Mutex
 }
 
 // Desc:
@@ -69,6 +70,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 	node.minProposalMutex = new(sync.Mutex)
 	node.valuesMutex = new(sync.Mutex)
 	node.proposalsMutex = new(sync.Mutex)
+	node.clientsMutex = new(sync.Mutex)
 
 	prpc := paxosrpc.Wrap(node)
 	rpc.Register(prpc)
@@ -81,6 +83,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 	}
 	go http.Serve(ln, nil)
 
+	node.clientsMutex.Lock()
 	for _, v := range hostMap {
 		client, dialErr := rpc.DialHTTP("tcp", v)
 		node.nodes[v] = client
@@ -99,6 +102,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 			return nil, dialErr
 		}
 	}
+	node.clientsMutex.Unlock()
 	return node, nil
 }
 
@@ -129,18 +133,24 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 	LOGF.Println(pn.myAddr, " is Proposing: ", args.N, " For key: ", args.Key, " with value: ", args.V)
 	result := make(chan paxosrpc.ProposeReply)
 	startOver := make(chan bool)
-	prepareResponses := make(chan paxosrpc.PrepareReply, len(pn.nodes))
-	acceptResponses := make(chan paxosrpc.AcceptReply, len(pn.nodes))
+
+	pn.clientsMutex.Lock()
+	numNodes := len(pn.nodes)
+	pn.clientsMutex.Unlock()
+
+	prepareResponses := make(chan paxosrpc.PrepareReply, numNodes)
+	acceptResponses := make(chan paxosrpc.AcceptReply, numNodes)
 	// The actual work is done in this go routine
 	go func() {
-		promises := make([]paxosrpc.PrepareReply, len(pn.nodes))
+		promises := make([]paxosrpc.PrepareReply, numNodes)
 
-		majorityOn := int(len(pn.nodes) / 2)
+		majorityOn := int(numNodes / 2)
 		prepareArgs := paxosrpc.PrepareArgs{}
 		prepareArgs.Key = args.Key
 		prepareArgs.N = args.N
 		prepareArgs.RequesterId = pn.myID
 		// 2) Broadcast Prepare to all paxos nodes
+		pn.clientsMutex.Lock()
 		for k, client := range pn.nodes {
 			go func(c *rpc.Client, k string) {
 				reply := paxosrpc.PrepareReply{}
@@ -150,6 +160,7 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 				return
 			}(client, k)
 		}
+		pn.clientsMutex.Unlock()
 		// 4) Wait for MAJORITY responses
 		func() {
 			for {
@@ -192,7 +203,7 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 		}
 		acceptMessage.RequesterId = pn.myID
 		// 5) Broadcast Accept message
-		responses := make([]paxosrpc.AcceptReply, len(pn.nodes))
+		responses := make([]paxosrpc.AcceptReply, numNodes)
 		for _, client := range pn.nodes {
 			go func(c *rpc.Client) {
 				reply := paxosrpc.AcceptReply{}
