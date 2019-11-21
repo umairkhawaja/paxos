@@ -3,11 +3,10 @@ package paxos
 import (
 	"encoding/json"
 	"errors"
-	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/rpc"
-	"os"
 	"paxosapp/rpc/paxosrpc"
 	"sync"
 	"time"
@@ -15,16 +14,16 @@ import (
 
 var PROPOSE_TIMEOUT = 15 * time.Second
 
-const (
-	flag = os.O_RDWR | os.O_CREATE
-	perm = os.FileMode(0666)
-)
+// const (
+// 	flag = os.O_RDWR | os.O_CREATE
+// 	perm = os.FileMode(0666)
+// )
 
-var name string
-var file *os.File
+// var name string
+// var file *os.File
 
-// LOGF to capture output
-var LOGF *log.Logger
+// // LOGF to capture output
+// var LOGF *log.Logger
 
 type paxosNode struct {
 	// TODO: implement this!
@@ -58,9 +57,9 @@ type paxosNode struct {
 // numRetries: if we can't connect with some nodes in hostMap after numRetries attempts, an error should be returned
 // replace: a flag which indicates whether this node is a replacement for a node which failed.
 func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, numRetries int, replace bool) (PaxosNode, error) {
-	name = "/mnt/f/Fall 2019/Distributed Systems/Assignment 3/Assignment3_code/paxosapp/log.txt"
-	file, _ = os.OpenFile(name, flag, perm)
-	LOGF = log.New(file, "", log.Lshortfile|log.Lmicroseconds)
+	// name = "/mnt/f/Fall 2019/Distributed Systems/Assignment 3/Assignment3_code/paxosapp/log.txt"
+	// file, _ = os.OpenFile(name, flag, perm)
+	// LOGF = log.New(file, "", log.Lshortfile|log.Lmicroseconds)
 
 	node := new(paxosNode)
 	node.nodes = make(map[int]*rpc.Client)             // Storing all RPC connections
@@ -82,7 +81,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 	rpc.HandleHTTP()
 	ln, err := net.Listen("tcp", myHostPort)
 	if err != nil {
-		LOGF.Println(err)
+		// LOGF.Println(err)
 		return nil, err
 	}
 	go http.Serve(ln, nil)
@@ -98,7 +97,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 			prepareArgs.Hostport = myHostPort
 			prepareArgs.SrvID = srvId
 			client.Call("PaxosNode.RecvReplaceServer", &prepareArgs, &replySer)
-			LOGF.Println("Replacement Node dialing ", id)
+			// LOGF.Println("Replacement Node dialing ", id)
 
 		}
 
@@ -120,8 +119,8 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 
 		}
 		if dialErr != nil {
-			LOGF.Println(dialErr)
-			LOGF.Println("SS")
+			// LOGF.Println(dialErr)
+			// LOGF.Println("SS")
 
 			return nil, dialErr
 		}
@@ -139,7 +138,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 				for key := range node.database {
 					node.database[key] = uint32(node.database[key].(float64))
 				}
-				LOGF.Println(node.database)
+				// LOGF.Println(node.database)
 				node.dbMutex.Unlock()
 				break
 
@@ -176,8 +175,8 @@ func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, re
 // args: the key, value pair to propose together with the proposal number returned by GetNextProposalNumber
 // reply: value that was actually committed for the given key
 func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.ProposeReply) error {
-	LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
-	LOGF.Println(pn.myAddr, " is Proposing: ", args.N, " For key: ", args.Key, " with value: ", args.V)
+	// LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
+	// LOGF.Println(pn.myAddr, " is Proposing: ", args.N, " For key: ", args.Key, " with value: ", args.V)
 	result := make(chan paxosrpc.ProposeReply)
 	startOver := make(chan bool)
 
@@ -213,7 +212,7 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 			for {
 				select {
 				case reply := <-prepareResponses:
-					LOGF.Println("Got a Promise: ", reply.N_a, reply.V_a, reply.Status)
+					// LOGF.Println("Got a Promise: ", reply.N_a, reply.V_a, reply.Status)
 					promises = append(promises, reply)
 					if len(promises) > majorityOn { // Do not wait for all replies.
 						return
@@ -287,15 +286,16 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 		}
 		if anyRejections {
 			// Start over with new proposal number
+
 			startOver <- true
 		} else {
 			// 6b) Commit and update (key,value) pair
 			committedMessage := acceptMessage
-			for k, client := range pn.nodes {
+			for _, client := range pn.nodes {
 				commArgs := paxosrpc.CommitArgs{}
 				commArgs.Key = committedMessage.Key
 				commArgs.V = committedMessage.V
-				LOGF.Println("Sending Commit for: ", commArgs.Key, commArgs.V, " to : ", k)
+				// LOGF.Println("Sending Commit for: ", commArgs.Key, commArgs.V, " to : ", k)
 				if commArgs.Key != "" {
 					commArgs.RequesterId = committedMessage.RequesterId
 					commitResp := paxosrpc.CommitReply{}
@@ -318,7 +318,15 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 		return nil
 	case <-startOver:
 		// 6a)  If paxos rejected value, then start over
-		reply.V = nil
+		// reply.V = nil
+		r := rand.Intn(5)
+		time.Sleep(time.Duration(r) * time.Second)
+		pnArgs := new(paxosrpc.ProposalNumberArgs)
+		pnArgs.Key = args.Key
+		pnReply := new(paxosrpc.ProposalNumberReply)
+		pn.GetNextProposalNumber(pnArgs, pnReply)
+		args.N = pnReply.N
+		pn.nodes[pn.myID].Call("PaxosNode.Propose", args, reply)
 		return nil
 	}
 }
