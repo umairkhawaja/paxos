@@ -3,7 +3,6 @@ package paxos
 import (
 	"encoding/json"
 	"errors"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -319,8 +318,9 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 	case <-startOver:
 		// 6a)  If paxos rejected value, then start over
 		// reply.V = nil
-		r := rand.Intn(5)
-		time.Sleep(time.Duration(r) * time.Second)
+		// r := rand.Intn(5)
+		// time.Sleep(time.Duration(r) * time.Second)
+		time.Sleep(5 * time.Second)
 		pnArgs := new(paxosrpc.ProposalNumberArgs)
 		pnArgs.Key = args.Key
 		pnReply := new(paxosrpc.ProposalNumberReply)
