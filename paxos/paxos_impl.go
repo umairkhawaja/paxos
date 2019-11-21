@@ -1,6 +1,7 @@
 package paxos
 
 import (
+	"encoding/json"
 	"errors"
 	"log"
 	"net"
@@ -22,9 +23,12 @@ const (
 var name string
 var file *os.File
 
+// LOGF to capture output
+var LOGF *log.Logger
+
 type paxosNode struct {
 	// TODO: implement this!
-	nodes              map[string]*rpc.Client
+	nodes              map[int]*rpc.Client
 	myID               int
 	myAddr             string
 	minProposalNumbers map[string]int
@@ -54,19 +58,20 @@ type paxosNode struct {
 // numRetries: if we can't connect with some nodes in hostMap after numRetries attempts, an error should be returned
 // replace: a flag which indicates whether this node is a replacement for a node which failed.
 func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, numRetries int, replace bool) (PaxosNode, error) {
-	LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
-	name = myHostPort + " log.txt"
+	name = "/mnt/f/Fall 2019/Distributed Systems/Assignment 3/Assignment3_code/paxosapp/log.txt"
 	file, _ = os.OpenFile(name, flag, perm)
+	LOGF = log.New(file, "", log.Lshortfile|log.Lmicroseconds)
+
 	node := new(paxosNode)
-	node.nodes = make(map[string]*rpc.Client)
-	node.minProposalNumbers = make(map[string]int)
-	node.acceptedProposals = make(map[string]int)
-	node.acceptedValues = make(map[string]interface{})
-	node.maxRoundNumber = make(map[string]int)
-	node.database = make(map[string]interface{})
+	node.nodes = make(map[int]*rpc.Client)             // Storing all RPC connections
+	node.minProposalNumbers = make(map[string]int)     // Store minimum proposal number for each key
+	node.acceptedProposals = make(map[string]int)      // Store accepted Proposals for each key
+	node.acceptedValues = make(map[string]interface{}) // Store accepted values for each key
+	node.maxRoundNumber = make(map[string]int)         // Store max round number for each key
+	node.database = make(map[string]interface{})       // Store final committed value
 	node.myID = srvId
 	node.myAddr = hostMap[srvId]
-	node.dbMutex = new(sync.Mutex)
+	node.dbMutex = new(sync.Mutex) // Locks to avoid data races
 	node.minProposalMutex = new(sync.Mutex)
 	node.valuesMutex = new(sync.Mutex)
 	node.proposalsMutex = new(sync.Mutex)
@@ -75,7 +80,6 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 	prpc := paxosrpc.Wrap(node)
 	rpc.Register(prpc)
 	rpc.HandleHTTP()
-
 	ln, err := net.Listen("tcp", myHostPort)
 	if err != nil {
 		LOGF.Println(err)
@@ -84,9 +88,19 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 	go http.Serve(ln, nil)
 
 	node.clientsMutex.Lock()
-	for _, v := range hostMap {
+	for id, v := range hostMap {
 		client, dialErr := rpc.DialHTTP("tcp", v)
-		node.nodes[v] = client
+		node.nodes[id] = client
+		if replace && dialErr == nil && id != srvId {
+
+			replySer := paxosrpc.ReplaceServerReply{}
+			prepareArgs := paxosrpc.ReplaceServerArgs{}
+			prepareArgs.Hostport = myHostPort
+			prepareArgs.SrvID = srvId
+			client.Call("PaxosNode.RecvReplaceServer", &prepareArgs, &replySer)
+			LOGF.Println("Replacement Node dialing ", id)
+
+		}
 
 		for i := numRetries; i >= 0; i-- {
 			if dialErr == nil {
@@ -94,14 +108,47 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 			}
 			time.Sleep(1 * time.Second)
 			client, dialErr = rpc.DialHTTP("tcp", v)
-			node.nodes[v] = client
+			node.nodes[id] = client
+			if replace && dialErr == nil && id != srvId {
+				replySer := paxosrpc.ReplaceServerReply{}
+				prepareArgs := paxosrpc.ReplaceServerArgs{}
+				prepareArgs.Hostport = myHostPort
+				prepareArgs.SrvID = srvId
+				client.Call("PaxosNode.RecvReplaceServer", &prepareArgs, &replySer)
+
+			}
 
 		}
 		if dialErr != nil {
 			LOGF.Println(dialErr)
+			LOGF.Println("SS")
+
 			return nil, dialErr
 		}
 	}
+	if replace {
+		for id, client := range node.nodes {
+			if id != srvId {
+				PrepareArgs := paxosrpc.ReplaceCatchupArgs{}
+				ReplySer := paxosrpc.ReplaceCatchupReply{}
+				client.Call("PaxosNode.RecvReplaceCatchup", &PrepareArgs, &ReplySer)
+				tempDB := make(map[string]interface{})
+				json.Unmarshal(ReplySer.Data, &tempDB)
+				node.dbMutex.Lock()
+				node.database = tempDB
+				for key := range node.database {
+					node.database[key] = uint32(node.database[key].(float64))
+				}
+				LOGF.Println(node.database)
+				node.dbMutex.Unlock()
+				break
+
+			}
+
+		}
+
+	}
+
 	node.clientsMutex.Unlock()
 	return node, nil
 }
@@ -152,7 +199,7 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 		// 2) Broadcast Prepare to all paxos nodes
 		pn.clientsMutex.Lock()
 		for k, client := range pn.nodes {
-			go func(c *rpc.Client, k string) {
+			go func(c *rpc.Client, k int) {
 				reply := paxosrpc.PrepareReply{}
 				c.Call("PaxosNode.RecvPrepare", &prepareArgs, &reply)
 				// LOGF.Println("RECEIVED PREPARE FROM", k)
@@ -204,6 +251,7 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 		acceptMessage.RequesterId = pn.myID
 		// 5) Broadcast Accept message
 		responses := make([]paxosrpc.AcceptReply, numNodes)
+		pn.clientsMutex.Lock()
 		for _, client := range pn.nodes {
 			go func(c *rpc.Client) {
 				reply := paxosrpc.AcceptReply{}
@@ -214,6 +262,7 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 				return
 			}(client)
 		}
+		pn.clientsMutex.Unlock()
 		// 5) Wait for MAJORITY responses
 		func() {
 			for {
@@ -386,11 +435,11 @@ func (pn *paxosNode) RecvAccept(args *paxosrpc.AcceptArgs, reply *paxosrpc.Accep
 // args: the Commit Message, you must include RequesterId when you call this API
 // reply: the Commit Reply Message
 func (pn *paxosNode) RecvCommit(args *paxosrpc.CommitArgs, reply *paxosrpc.CommitReply) error {
-	LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
+	// LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
 
 	key := args.Key
 	value := args.V
-	LOGF.Println("Committing: ", key, value)
+	// LOGF.Println("Committing: ", key, value)
 	pn.dbMutex.Lock()
 	pn.database[key] = value
 	pn.dbMutex.Unlock()
@@ -406,7 +455,29 @@ func (pn *paxosNode) RecvCommit(args *paxosrpc.CommitArgs, reply *paxosrpc.Commi
 // args: the id and the hostport of the server being replaced
 // reply: no use
 func (pn *paxosNode) RecvReplaceServer(args *paxosrpc.ReplaceServerArgs, reply *paxosrpc.ReplaceServerReply) error {
-	return errors.New("not implemented")
+
+	pn.clientsMutex.Lock()
+	hostport := args.Hostport
+	SrvID := args.SrvID
+	client, dialErr := rpc.DialHTTP("tcp", hostport)
+	pn.nodes[SrvID] = client
+	// LOGF.Println("Dialing")
+	for i := 10; i >= 0; i-- {
+		if dialErr == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+
+		client, dialErr = rpc.DialHTTP("tcp", hostport)
+		pn.nodes[SrvID] = client
+	}
+
+	if dialErr != nil {
+		return errors.New("Dial Error")
+	}
+	// LOGF.Println("DIALED")
+	pn.clientsMutex.Unlock()
+	return nil
 }
 
 // Desc:
@@ -419,16 +490,16 @@ func (pn *paxosNode) RecvReplaceServer(args *paxosrpc.ReplaceServerArgs, reply *
 // args: no use
 // reply: a byte array containing necessary data used by replacement server to recover
 func (pn *paxosNode) RecvReplaceCatchup(args *paxosrpc.ReplaceCatchupArgs, reply *paxosrpc.ReplaceCatchupReply) error {
-	return errors.New("not implemented")
+	pn.dbMutex.Lock()
+	DbBytes, _ := json.Marshal(pn.database)
+	// LOGF.Println("Sending Marshal back")
+	reply.Data = DbBytes
+	pn.dbMutex.Unlock()
+	return nil
 }
 
 func mergeNumbers(rn, id int) int {
 	return ((rn << 32) | (id & 0xffff))
-	// merged, err := strconv.Atoi(strconv.Itoa(rn) + strconv.Itoa(id))
-	// if err != nil {
-	// panic(err)
-	// }
-	// return merged
 }
 
 func splitNumber(num int) (int, int) {

@@ -2,3 +2,8 @@
 Paxos Algo.png
 *.pdf
 *.txt
+*.zip
+paxos/paxos_impl.goOLD
+Assignment3_deadline2_tests/paxostest_pack3
+Assignment3_deadline2_tests/paxostest_pack2
+Assignment3_deadline2_tests/paxostest_pack1
