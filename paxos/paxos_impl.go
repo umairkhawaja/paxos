@@ -13,6 +13,21 @@ import (
 
 var PROPOSE_TIMEOUT = 15 * time.Second
 
+/*
+	PAXOS Algorithm implemented:
+
+	1) Choose Proposal Number for a given key
+	2) Broadcast Prepare to all paxos nodes
+	3) (Acceptor) If received proposedNumber > currently known minProposal for that key, then update minProposal = proposedNumber
+	4) Wait for MAJORITY responses
+	4) Process the replies and generate Accept Message: if any acceptedValues returned, choose the highest acceptedProposal
+	5) Broadcast Accept message
+	5) Wait for MAJORITY responses
+	6) Check if paxos accepted or rejected it: If any rejections then start over
+	6b) Commit and update (key,value) pair: If accepted then commit to Database
+	6) (Acceptor) If proposalNumber >= minProposal for that key then update acceptedProposal and values to proposalNumber and its value
+*/
+
 type paxosNode struct {
 	// TODO: implement this!
 	nodes              map[int]*rpc.Client
@@ -138,6 +153,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 // args: the key to propose
 // reply: the next proposal number for the given key
 func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, reply *paxosrpc.ProposalNumberReply) error {
+	// 1) Choose Proposal Number for a given key
 	pn.roundMutex.Lock()
 	pn.maxRoundNumber[args.Key]++
 	reply.N = mergeNumbers(pn.maxRoundNumber[args.Key], pn.myID)
@@ -336,6 +352,7 @@ func (pn *paxosNode) RecvPrepare(args *paxosrpc.PrepareArgs, reply *paxosrpc.Pre
 	pn.proposalsMutex.Lock()
 	pn.valuesMutex.Lock()
 	minProposal, ok := pn.minProposalNumbers[key]
+	// 3) If received proposedNumber > currently known minProposal for that key, then update minProposal = proposedNumber
 	if !ok {
 		pn.minProposalNumbers[key] = proposedNumber
 		reply.N_a = -1
@@ -381,6 +398,7 @@ func (pn *paxosNode) RecvAccept(args *paxosrpc.AcceptArgs, reply *paxosrpc.Accep
 	pn.proposalsMutex.Lock()
 	pn.valuesMutex.Lock()
 	minProposal, ok := pn.minProposalNumbers[key]
+	// 6) If proposalNumber >= minProposal for that key then update acceptedProposal and values to proposalNumber and its value
 	if !ok {
 		pn.acceptedProposals[key] = proposalNumber
 		pn.minProposalNumbers[key] = proposalNumber
